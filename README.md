@@ -37,7 +37,7 @@ Note: You can switch to a sliding window or token bucket for smoother distributi
 
 ## Project Structure
 
-- `src/guards/RateLimiterGuard.ts` – Core guard performing the Redis-backed checks
+- `src/guards/rate-limiter-guard.ts` – Core guard performing the Redis-backed checks
 - `src/services/redis-service.ts` – Redis client setup (connection, helpers)
 - `src/controller/test.controller.ts` – Sample endpoint to exercise the guard
 - `docker-compose.yml` – Redis service with persistence
@@ -45,7 +45,7 @@ Note: You can switch to a sliding window or token bucket for smoother distributi
 
 ## Configuration
 
-Common parameters you may adjust in `RateLimiterGuard`:
+Common parameters you may adjust in `rate-limiter-guard`:
 
 - `windowSeconds`: duration of the rate-limit window (e.g., 60)
 - `maxRequests`: allowed requests per window per key
