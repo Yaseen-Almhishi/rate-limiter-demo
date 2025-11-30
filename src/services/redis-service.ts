@@ -17,3 +17,5 @@ export class RedisService {
     await this.redisClient.expire(key, seconds);
   }
 }
+
+//Note: In a high-scale production env, I would wrap these two commands in a Lua script to ensure atomicity.
