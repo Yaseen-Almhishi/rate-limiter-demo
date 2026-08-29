@@ -1,124 +1,91 @@
-# Rate Limiter Demo (NestJS + Redis)
+# Redis rate limiter for NestJS
 
-A small, production-minded NestJS service showcasing a Redis-backed rate limiter guard that works reliably in distributed deployments. Includes Docker Compose for Redis, a simple test controller, and e2e tests.
+A focused demonstration of a fixed-window HTTP rate limiter backed by Redis. I built it to explore the parts that become important once counters are shared between API instances: atomic updates, client identity behind proxies, response headers, failure policy, and repeatable tests.
 
-## Highlights
+This is an educational reference, not a drop-in production package. The example protects one route, `GET /dashboard`, with a limit of 10 requests per 60 seconds by default.
 
-- Global/route-level rate limiting with a NestJS Guard
-- Redis-backed counters for accuracy across multiple API instances
-- Dockerized Redis with persisted data (AOF/RDB)
-- Clear extension points for user/IP keys, windows, and limits
-- E2E tests to validate throttling behavior
+## What the example demonstrates
 
-## Architecture Decision
+- A NestJS guard applied at route level
+- An atomic Redis Lua operation that increments the counter and preserves its expiry
+- Standard rate-limit response headers and `Retry-After` on HTTP 429
+- Environment-based Redis and policy configuration
+- An explicit Redis failure mode: closed by default, optionally open
+- Explicit trusted-proxy configuration instead of trusting forwarded headers globally
+- An end-to-end test that proves requests 1–10 pass and request 11 is rejected
 
-I chose Redis over in-memory storage because in a distributed system (like Kubernetes) with multiple API instances, in-memory rate limiting fails. Redis provides a centralized state for accurate blocking across all instances.
+## Request flow
 
-### Why a Guard?
+```text
+HTTP request
+    │
+    ├─ Express resolves request.ip using the configured proxy trust policy
+    │
+    ├─ RateLimiterGuard builds rate_limit:fixed:<ip>
+    │
+    ├─ Redis atomically increments the counter and returns its TTL
+    │
+    └─ The guard returns the route response or HTTP 429
+```
 
-- Guards in NestJS run before the route handler, making them ideal for access control and throttling.
-- Encapsulation: rate limiting logic stays separate from controllers/services.
-- Composability: you can apply the guard globally or per-route.
-
-### Data Model
-
-- Key: string representing the requester, e.g., `ip:<addr>` or `user:<id>`
-- Counter: integer stored in Redis (INCR)
-- TTL: window duration maintained via EXPIRE, set-on-first increment
-
-### Algorithm (Fixed Window)
-
-1. Derive a key for the requester and current window bucket (e.g., minute-based)
-2. INCR the key in Redis
-3. If the count is 1, set EXPIRE for the window length
-4. If the count exceeds the limit, block with HTTP 429
-
-Note: You can switch to a sliding window or token bucket for smoother distribution if needed.
-
-## Project Structure
-
-- `src/guards/rate-limiter-guard.ts` – Core guard performing the Redis-backed checks
-- `src/services/redis-service.ts` – Redis client setup (connection, helpers)
-- `src/controller/test.controller.ts` – Sample endpoint to exercise the guard
-- `docker-compose.yml` – Redis service with persistence
-- `test/app.e2e-spec.ts` – E2E test ensuring throttling works
+Redis makes the counter shareable, but only when every API instance connects to the same Redis deployment. This repository does not include a Kubernetes or multi-host deployment, so it does not claim to prove that infrastructure.
 
 ## Configuration
 
-Common parameters you may adjust in `rate-limiter-guard`:
+Copy `.env.example` to `.env` and replace the example Redis password. The main settings are:
 
-- `windowSeconds`: duration of the rate-limit window (e.g., 60)
-- `maxRequests`: allowed requests per window per key
-- `keyStrategy`: how to derive a requester key (IP, userId, API key)
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `REDIS_HOST` | `127.0.0.1` | Redis hostname |
+| `REDIS_PORT` | `6379` | Redis port |
+| `REDIS_PASSWORD` | unset | Redis password |
+| `REDIS_TLS` | `false` | Enable TLS for a managed or remote Redis service |
+| `RATE_LIMIT_MAX` | `10` | Requests allowed in one window |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Window duration |
+| `RATE_LIMIT_FAILURE_MODE` | `closed` | `closed` returns 503; `open` allows traffic and logs the outage |
+| `TRUSTED_PROXIES` | unset | Comma-separated proxy names, IPs, or CIDRs trusted by Express |
 
-You can expose these via environment variables if desired (e.g., `RATE_LIMIT_WINDOW`, `RATE_LIMIT_MAX`).
+Do not set `TRUSTED_PROXIES` unless the application is actually behind those proxies. Trusting arbitrary forwarded addresses lets callers choose their own rate-limit key.
 
-## Running the Stack
+## Run locally
 
-You can run Redis locally via Docker and the Nest server via npm scripts.
-
-### Prerequisites
-
-- Node.js 18+
-- Docker Desktop
-
-### Start Redis (Docker Compose)
+Prerequisites: Node.js 20+ and Docker Desktop.
 
 ```powershell
-# From the project root
+$env:REDIS_PASSWORD = "replace-with-a-random-local-password"
+Copy-Item .env.example .env
+# Put the same password in .env, then:
 docker compose up -d
-```
-
-Redis data will persist under `redis_data/`.
-
-### Install and Run the API
-
-```powershell
-# From the project root
 npm install
 npm run start:dev
 ```
 
-The API will start (default Nest port is 3000). Check `src/controller/test.controller.ts` for the sample route.
+The Compose file publishes Redis on `127.0.0.1` only and requires the password supplied through `REDIS_PASSWORD`. The API listens on port 3000 unless `PORT` is set.
 
-## Usage
-
-- Hit the sample endpoint repeatedly to trigger rate limiting.
-- Observe HTTP 429 responses when exceeding `maxRequests` within `windowSeconds`.
-- Logs will show the key and current count for visibility during development.
-
-## Testing
-
-Run unit/e2e tests to validate the guard behavior.
+Exercise the protected endpoint:
 
 ```powershell
-npm run test
-npm run test:e2e
+1..11 | ForEach-Object { Invoke-WebRequest http://localhost:3000/dashboard }
 ```
 
-Make sure Redis is running for e2e tests that depend on it.
+## Verify the project
 
-## Extending
+The end-to-end test uses an in-memory Redis-service substitute, so it does not require Docker:
 
-- Switch key strategy: derive keys by IP, header token, or authenticated user id.
-- Change windowing: move to sliding window or token bucket.
-- Add whitelist/bypass: allow specific keys to skip limits.
-- Per-route configs: pass options via a custom decorator and read them in the guard.
+```powershell
+npm run lint
+npm test
+npm run test:e2e
+npm run build
+```
 
-## Operational Considerations
+## Deliberate boundaries
 
-- Backoff and retry headers: consider returning `Retry-After` or custom headers (`X-RateLimit-*`).
-- Redis availability: guard should degrade gracefully if Redis is down (e.g., allow traffic, but log an alert).
-- Cold starts: INCR+EXPIRE ensures TTL is set only once, reducing extra calls.
-- Observability: log blocked events and expose metrics (Prometheus) for monitoring.
+- Fixed windows permit bursts at a window boundary; sliding-window or token-bucket algorithms may be a better product choice.
+- IP addresses are imperfect identities because users can share NAT addresses. Authenticated applications should usually key primarily by account, tenant, or API client and use IP as a secondary signal.
+- Rate limiting is one availability control, not authentication or authorization.
+- Redis credentials and persisted runtime data belong outside version control.
 
-## Troubleshooting
+## Repository status
 
-- HTTP 429 too early: verify your key derivation; shared IPs can cause stricter limits.
-- No throttling: confirm guard is applied (global or route-level) and Redis is reachable.
-- Redis errors: ensure Docker is up and ports aren’t blocked; check `docker-compose.yml` service name and connection string.
-
-## Notes
-
-- The demo uses a fixed window counter for simplicity. In production, consider sliding windows or leaky/token buckets to avoid burstiness.
-- Keep secrets and environment configuration out of source control; use `.env` with proper tooling.
+The repository is currently marked `UNLICENSED`, so no reuse license is granted yet. Adding an open-source license is a separate project decision.
